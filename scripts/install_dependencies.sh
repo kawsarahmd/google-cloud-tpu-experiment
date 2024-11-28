@@ -64,4 +64,8 @@ sudo apt-get update
 sudo apt-get install gcsfuse
 # gcsfuse bangla_pretrained_v2 ~/.cache/huggingface/
 
+echo "Installing twilio client"
+pip install twilio
+
+
 echo "All installations completed successfully."
