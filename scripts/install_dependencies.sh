@@ -43,6 +43,12 @@ git clone https://github.com/google/flax.git
 # Install Flax for the user
 pip install --user flax
 
+# Install NLTK
+pip install nltk
+# Install TF-Keras
+pip install tf-keras
+# Install Rouge Score
+pip install rouge_score
 
 echo "Installing tpu-info..."
 pip install tpu-info
