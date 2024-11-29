@@ -68,7 +68,11 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.clou
 curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.asc
 sudo apt-get update
 sudo apt-get install gcsfuse
+
+# mount command below
 # gcsfuse bangla_pretrained_v2 ~/.cache/huggingface/
+# unmount command below
+# fusermount -u /home/kawsa/.cache/huggingface
 
 echo "Installing twilio client"
 pip install twilio
