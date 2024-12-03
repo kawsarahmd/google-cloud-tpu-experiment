@@ -13,7 +13,7 @@ for base_model in "${base_models[@]}"; do
     fine_tuned_model_name=$(basename "$base_model")_"$suffix"
     model_output_dir="$output_dir/$fine_tuned_model_name"
 
-    python z-flax-summarization_v3.py \
+    python run_seq_to_seq_model_to_finetune.py \
         --output_dir "$model_output_dir" \
         --model_name_or_path "$base_model" \
         --tokenizer_name "$base_model" \
