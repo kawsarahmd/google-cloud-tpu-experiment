@@ -7,5 +7,13 @@ Welcome to the Google Cloud TPU Experiment Repository. This repository is dedica
 This repository contains experiments conducted with the JAX/Flax library, chosen for its superior performance in a TPU environment. The experiments focus on demonstrating the speed and efficiency of JAX/Flax on TPUs compared to other environments.
 
 
+## TPU Restart Command Example
+~bash
+""
+gcloud compute tpus tpu-vm stop tpu-vm-name --zone=us-central2-b && \
+gcloud compute tpus tpu-vm start tpu-vm-name --zone=us-central2-b
+""
+
+
 
 
