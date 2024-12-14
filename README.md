@@ -8,11 +8,10 @@ This repository contains experiments conducted with the JAX/Flax library, chosen
 
 
 ## TPU Restart Command Example
-~bash
-""
+To restart your TPU VM, use the following bash command:
+```bash
 gcloud compute tpus tpu-vm stop tpu-vm-name --zone=us-central2-b && \
 gcloud compute tpus tpu-vm start tpu-vm-name --zone=us-central2-b
-""
 
 
 
