@@ -77,5 +77,6 @@ sudo apt-get install gcsfuse
 echo "Installing twilio client"
 pip install twilio
 pip install unicodeconverter
+pip install --upgrade gradio
 
 echo "All installations completed successfully."
