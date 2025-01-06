@@ -111,5 +111,7 @@ EOL
 blobfuse2 mount ~/.cache/huggingface --config-file=~/blobfuse2/config.yaml
 # unmount command below
 # fusermount -u ~/.cache/huggingface
+# Force unmount
+# sudo umount -l /tmp/blobfuse2
 
 echo "All installations completed successfully."
