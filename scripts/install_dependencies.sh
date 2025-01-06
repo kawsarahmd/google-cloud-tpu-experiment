@@ -79,4 +79,37 @@ pip install twilio
 pip install unicodeconverter
 pip install --upgrade gradio
 
+
+# Install dependencies
+sudo apt install -y wget fuse
+
+# Download the Blobfuse2 package
+wget https://github.com/Azure/azure-storage-fuse/releases/download/blobfuse2-2.4.0/blobfuse2-2.4.0-Debian-10.0.x86_64.deb
+
+# Install the downloaded package
+sudo dpkg -i blobfuse2-2.4.0-Debian-10.0.x86_64.deb
+
+# Create necessary directories
+mkdir -p ~/blobfuse2 /tmp/blobfuse2
+
+# Set permissions for the cache directory
+chmod 777 /tmp/blobfuse2
+
+# Create and populate the config.yaml file
+cat <<EOL > ~/blobfuse2/config.yaml
+azstorage:
+  account-name: ACCOUNT_NAME
+  container: CONTAINER_NAME
+  auth-type: key
+  account-key: AZURE_KEY
+
+file_cache:
+  path: /tmp/blobfuse2
+EOL
+
+# Mount the .cache folder (including Hugging Face and others)
+blobfuse2 mount ~/.cache/huggingface --config-file=~/blobfuse2/config.yaml
+# unmount command below
+# fusermount -u ~/.cache/huggingface
+
 echo "All installations completed successfully."
