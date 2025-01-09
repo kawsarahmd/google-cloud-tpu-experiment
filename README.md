@@ -14,3 +14,9 @@ gcloud compute tpus tpu-vm stop tpu-vm-name --zone=us-central2-b && \
 gcloud compute tpus tpu-vm start tpu-vm-name --zone=us-central2-b
 ```
 
+## TPU Memory Clean
+If your script crashes unexpectedly and you need to clear the TPU memory, run the following Bash command:
+```bash
+sudo lsof $(ls /dev/accel*) | awk '{print $2}' | tail -n +2 | xargs sudo kill -9
+```
+
