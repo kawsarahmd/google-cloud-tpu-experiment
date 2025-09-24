@@ -6,7 +6,10 @@ sudo apt-get install --no-install-recommends --yes libopenblas-base libopenmpi-d
 VLLM_TARGET_DEVICE="tpu" python -m pip install -e .
 
 pip install "transformers[sentencepiece]"
-pip install datasets
+
+#since breaking change in version 4. scripts are no longer supported
+pip install datasets==3.6.0
+
 pip install accelerate
 
 pip install evaluate
