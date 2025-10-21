@@ -1,10 +1,12 @@
-# PyTorch T5 MLM Pretraining for TPU/GPU
+# PyTorch T5 for TPU/GPU
 
-This directory contains PyTorch versions of the T5 Masked Language Model pretraining script, converted from the original Flax implementation.
+This directory contains PyTorch versions of T5 training scripts (pretraining and fine-tuning), converted from the original Flax implementation with support for both GPU and TPU.
 
 ## Available Scripts
 
-### 1. `run_t5_mlm_to_pretrain.py` - Direct torch_xla Version
+### Pretraining Scripts
+
+#### 1. `run_t5_mlm_to_pretrain.py` - Direct torch_xla Version
 This version uses `torch_xla` directly for TPU training.
 
 **Pros:**
@@ -22,7 +24,7 @@ This version uses `torch_xla` directly for TPU training.
 - You need fine-grained control over TPU operations
 - You want maximum TPU performance optimization
 
-### 2. `run_t5_mlm_to_pretrain_accelerate.py` - Accelerate Version ⭐ RECOMMENDED
+#### 2. `run_t5_mlm_to_pretrain_accelerate.py` - Accelerate Version ⭐ RECOMMENDED
 This version uses Hugging Face Accelerate library for unified GPU/TPU/multi-GPU support.
 
 **Pros:**
@@ -42,6 +44,30 @@ This version uses Hugging Face Accelerate library for unified GPU/TPU/multi-GPU 
 - You want simpler, more maintainable code
 - You need easy switching between different hardware setups
 
+### Fine-tuning Script
+
+#### `run_seq_to_seq_model_to_finetune.py` - Accelerate Version ⭐ RECOMMENDED
+Fine-tuning script for sequence-to-sequence tasks (e.g., summarization, translation) using Hugging Face Accelerate.
+
+**Features:**
+- ✅ **Works on both GPU and TPU** with the same code
+- ✅ **ROUGE metrics** evaluation for summarization
+- ✅ **Text generation** during evaluation
+- ✅ **Label smoothing** support
+- ✅ **Gradient checkpointing** for memory efficiency
+- ✅ **Flexible datasets** - works with HuggingFace datasets or custom CSV/JSON files
+
+**Supported Tasks:**
+- Summarization (CNN/DailyMail, XSum, etc.)
+- Translation
+- Any seq2seq task
+
+**Use when:**
+- You want to fine-tune T5, BART, mT5, or other seq2seq models
+- You need to evaluate with ROUGE metrics
+- You want to switch easily between GPU and TPU
+- You need production-ready fine-tuning code
+
 ## Installation
 
 ### For TPU (torch_xla version):
@@ -51,7 +77,7 @@ pip install torch torch_xla datasets transformers huggingface_hub
 
 ### For GPU/TPU (Accelerate version - RECOMMENDED):
 ```bash
-pip install torch datasets transformers huggingface_hub accelerate
+pip install torch datasets transformers huggingface_hub accelerate evaluate rouge_score nltk
 ```
 
 For TPU with Accelerate, also install:
@@ -59,11 +85,15 @@ For TPU with Accelerate, also install:
 pip install torch_xla
 ```
 
+**Note:** The fine-tuning script requires `evaluate`, `rouge_score`, and `nltk` for ROUGE metrics.
+
 ## Usage
 
-### Using the Accelerate Version (Recommended)
+### Pretraining (MLM)
 
-#### Single GPU:
+#### Using the Accelerate Version (Recommended)
+
+##### Single GPU:
 ```bash
 python run_t5_mlm_to_pretrain_accelerate.py \
     --model_name_or_path t5-small \
@@ -82,7 +112,7 @@ python run_t5_mlm_to_pretrain_accelerate.py \
     --eval_steps 1000
 ```
 
-#### Multi-GPU:
+##### Multi-GPU:
 ```bash
 accelerate config  # Run once to configure
 
@@ -99,7 +129,7 @@ accelerate launch run_t5_mlm_to_pretrain_accelerate.py \
     --max_seq_length 512
 ```
 
-#### TPU (v3-8 or v4-8):
+##### TPU (v3-8 or v4-8):
 ```bash
 accelerate config  # Select TPU when prompted
 
@@ -116,7 +146,7 @@ accelerate launch run_t5_mlm_to_pretrain_accelerate.py \
     --max_seq_length 512
 ```
 
-#### With Mixed Precision (faster training):
+##### With Mixed Precision (faster training):
 ```bash
 accelerate launch run_t5_mlm_to_pretrain_accelerate.py \
     --model_name_or_path t5-small \
@@ -129,9 +159,9 @@ accelerate launch run_t5_mlm_to_pretrain_accelerate.py \
     --per_device_train_batch_size 16
 ```
 
-### Using the Direct torch_xla Version
+#### Using the Direct torch_xla Version
 
-#### TPU Only:
+##### TPU Only:
 ```bash
 python run_t5_mlm_to_pretrain.py \
     --model_name_or_path t5-small \
@@ -144,6 +174,131 @@ python run_t5_mlm_to_pretrain.py \
     --learning_rate 5e-5 \
     --num_train_epochs 3 \
     --max_seq_length 512
+```
+
+### Fine-tuning (Seq2Seq)
+
+#### Summarization Example - XSum Dataset
+
+##### Single GPU:
+```bash
+accelerate launch run_seq_to_seq_model_to_finetune.py \
+    --model_name_or_path t5-small \
+    --dataset_name xsum \
+    --text_column document \
+    --summary_column summary \
+    --source_prefix "summarize: " \
+    --do_train \
+    --do_eval \
+    --predict_with_generate \
+    --output_dir ./t5-small-xsum \
+    --per_device_train_batch_size 8 \
+    --per_device_eval_batch_size 8 \
+    --learning_rate 5e-5 \
+    --num_train_epochs 3 \
+    --max_source_length 512 \
+    --max_target_length 128 \
+    --num_beams 4 \
+    --logging_steps 100 \
+    --save_steps 1000 \
+    --eval_steps 1000
+```
+
+##### TPU (v3-8 or v4-8):
+```bash
+accelerate config  # Select TPU when prompted
+
+accelerate launch run_seq_to_seq_model_to_finetune.py \
+    --model_name_or_path t5-base \
+    --dataset_name xsum \
+    --text_column document \
+    --summary_column summary \
+    --source_prefix "summarize: " \
+    --do_train \
+    --do_eval \
+    --predict_with_generate \
+    --output_dir ./t5-base-xsum \
+    --per_device_train_batch_size 32 \
+    --per_device_eval_batch_size 16 \
+    --learning_rate 5e-5 \
+    --num_train_epochs 3 \
+    --max_source_length 512 \
+    --max_target_length 128 \
+    --num_beams 4 \
+    --mixed_precision bf16
+```
+
+##### With Gradient Checkpointing (for large models):
+```bash
+accelerate launch run_seq_to_seq_model_to_finetune.py \
+    --model_name_or_path t5-large \
+    --dataset_name xsum \
+    --text_column document \
+    --summary_column summary \
+    --source_prefix "summarize: " \
+    --do_train \
+    --do_eval \
+    --predict_with_generate \
+    --output_dir ./t5-large-xsum \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 4 \
+    --gradient_checkpointing \
+    --mixed_precision bf16 \
+    --num_train_epochs 3
+```
+
+#### CNN/DailyMail Dataset:
+```bash
+accelerate launch run_seq_to_seq_model_to_finetune.py \
+    --model_name_or_path t5-small \
+    --dataset_name cnn_dailymail \
+    --dataset_config_name "3.0.0" \
+    --source_prefix "summarize: " \
+    --do_train \
+    --do_eval \
+    --predict_with_generate \
+    --output_dir ./t5-small-cnn \
+    --per_device_train_batch_size 8 \
+    --num_train_epochs 3 \
+    --max_source_length 1024 \
+    --max_target_length 128 \
+    --num_beams 4
+```
+
+#### Custom Dataset (CSV/JSON):
+```bash
+# Your data should have two columns: one for source text, one for summary
+accelerate launch run_seq_to_seq_model_to_finetune.py \
+    --model_name_or_path t5-small \
+    --train_file ./data/train.json \
+    --validation_file ./data/val.json \
+    --text_column text \
+    --summary_column summary \
+    --source_prefix "summarize: " \
+    --do_train \
+    --do_eval \
+    --predict_with_generate \
+    --output_dir ./t5-custom \
+    --per_device_train_batch_size 8 \
+    --num_train_epochs 5 \
+    --max_source_length 512 \
+    --max_target_length 128
+```
+
+#### With Prediction on Test Set:
+```bash
+accelerate launch run_seq_to_seq_model_to_finetune.py \
+    --model_name_or_path ./t5-small-xsum \
+    --dataset_name xsum \
+    --text_column document \
+    --summary_column summary \
+    --do_predict \
+    --predict_with_generate \
+    --output_dir ./predictions \
+    --per_device_eval_batch_size 16 \
+    --max_source_length 512 \
+    --max_target_length 128 \
+    --num_beams 4
 ```
 
 ## Configuration with JSON
@@ -182,13 +337,13 @@ python run_t5_mlm_to_pretrain.py config.json
 
 ## Key Arguments
 
-### Model Arguments
-- `--model_name_or_path`: Pretrained model checkpoint (e.g., `t5-small`, `t5-base`)
+### Model Arguments (Both Scripts)
+- `--model_name_or_path`: Pretrained model checkpoint (e.g., `t5-small`, `t5-base`, `t5-large`)
 - `--config_name`: Config file path (if different from model)
 - `--tokenizer_name`: Tokenizer path (if different from model)
 - `--dtype`: Model dtype (`float32`, `float16`, `bfloat16`)
 
-### Data Arguments
+### Data Arguments - Pretraining
 - `--dataset_name`: HuggingFace dataset name
 - `--dataset_config_name`: Dataset configuration
 - `--train_file`: Local training file (`.txt`, `.json`, `.csv`)
@@ -197,7 +352,20 @@ python run_t5_mlm_to_pretrain.py config.json
 - `--mlm_probability`: Masking probability (default: 0.15)
 - `--mean_noise_span_length`: Average span length for masking (default: 3.0)
 
-### Training Arguments
+### Data Arguments - Fine-tuning
+- `--dataset_name`: HuggingFace dataset name (e.g., `xsum`, `cnn_dailymail`)
+- `--dataset_config_name`: Dataset configuration
+- `--train_file` / `--validation_file` / `--test_file`: Local data files (`.json`, `.csv`)
+- `--text_column`: Column name for input text (default: auto-detected)
+- `--summary_column`: Column name for summaries (default: auto-detected)
+- `--source_prefix`: Prefix for input text (e.g., `"summarize: "` for T5)
+- `--max_source_length`: Max input length (default: 1024)
+- `--max_target_length`: Max target length (default: 128)
+- `--val_max_target_length`: Max target length for validation
+- `--predict_with_generate`: Use generation for evaluation (enables ROUGE metrics)
+- `--num_beams`: Number of beams for generation (default: 1)
+
+### Training Arguments (Both Scripts)
 - `--output_dir`: Output directory for checkpoints
 - `--per_device_train_batch_size`: Batch size per device
 - `--per_device_eval_batch_size`: Eval batch size per device
@@ -210,10 +378,11 @@ python run_t5_mlm_to_pretrain.py config.json
 - `--gradient_accumulation_steps`: Gradient accumulation steps
 - `--max_grad_norm`: Max gradient norm for clipping (default: 1.0)
 - `--mixed_precision`: Mixed precision (`no`, `fp16`, `bf16`) - Accelerate only
+- `--gradient_checkpointing`: Enable gradient checkpointing (saves memory)
+- `--label_smoothing_factor`: Label smoothing (default: 0.0) - Fine-tuning only
 
-### Hub Arguments
+### Hub Arguments (Both Scripts)
 - `--push_to_hub`: Push model to HuggingFace Hub after training
-- `--push_to_hub_final_step`: Push only final checkpoint
 - `--hub_model_id`: Model repository name
 - `--hub_token`: HuggingFace token
 
