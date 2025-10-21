@@ -924,134 +924,136 @@ def main():
     state = jax_utils.replicate(state)
 
     train_time = 0
-    epochs = tqdm(range(num_epochs), desc="Epoch ... ", position=0)
-    
-    for epoch in epochs:
-        # ======================== Training ================================
+
+    # Create sampling rng
+    rng, input_rng = jax.random.split(rng)
+
+    if data_args.streaming:
+        # ======================== Streaming Training ================================
+        # For streaming datasets, iterate for total training steps (not epochs)
+        dataset_iter = iter(tokenized_datasets["train"])
         train_start = time.time()
         train_metrics = []
 
-        # Create sampling rng
-        rng, input_rng = jax.random.split(rng)
+        steps_pbar = tqdm(range(num_train_steps), desc="Training steps", position=0)
 
-        if data_args.streaming:
-            # For streaming datasets, iterate directly
-            dataset_iter = iter(tokenized_datasets["train"])
-            step = 0
-            steps_per_epoch = data_args.estimated_dataset_size // train_batch_size if data_args.max_train_steps is None else data_args.max_train_steps // num_epochs
-            
-            while step < steps_per_epoch:
-                # Collect batch samples from streaming dataset
+        for cur_step in steps_pbar:
+            # Collect batch samples from streaming dataset
+            samples = collect_batch_samples(dataset_iter, train_batch_size)
+
+            # Skip if we don't have enough samples for a full batch
+            if len(samples) < train_batch_size:
+                logger.info(f"Skipping incomplete batch with {len(samples)} samples, recreating iterator")
+                # Recreate iterator to loop dataset
+                dataset_iter = iter(tokenized_datasets["train"])
                 samples = collect_batch_samples(dataset_iter, train_batch_size)
-                
-                # Skip if we don't have enough samples for a full batch
                 if len(samples) < train_batch_size:
-                    logger.info(f"Skipping incomplete batch with {len(samples)} samples")
+                    logger.warning("Still not enough samples, stopping training")
                     break
-                    
-                try:
-                    model_inputs = data_collator(samples)
-                except Exception as e:
-                    logger.warning(f"Error in data collator: {e}, skipping batch")
-                    continue
 
-                local_host_model_inputs = {
-                    key: np.split(model_inputs.data[key], num_of_hosts, axis=0)[current_host_idx]
-                    for key, value in model_inputs.data.items()
-                }
+            try:
+                model_inputs = data_collator(samples)
+            except Exception as e:
+                logger.warning(f"Error in data collator: {e}, skipping batch")
+                continue
 
-                # Model forward
-                model_inputs = shard(local_host_model_inputs)
-                state, train_metric, dropout_rngs = p_train_step(state, model_inputs, dropout_rngs)
-                train_metrics.append(train_metric)
+            local_host_model_inputs = {
+                key: np.split(model_inputs[key], num_of_hosts, axis=0)[current_host_idx]
+                for key in model_inputs.keys()
+            }
 
-                cur_step = epoch * steps_per_epoch + step
-                step += 1
+            # Model forward
+            model_inputs = shard(local_host_model_inputs)
+            state, train_metric, dropout_rngs = p_train_step(state, model_inputs, dropout_rngs)
+            train_metrics.append(train_metric)
 
-                if cur_step % training_args.logging_steps == 0 and cur_step > 0:
-                    # Save metrics
-                    train_metric = jax_utils.unreplicate(train_metric)
-                    train_time += time.time() - train_start
-                    if has_tensorboard and jax.process_index() == 0:
-                        write_train_metric(summary_writer, train_metrics, train_time, cur_step)
+            if cur_step % training_args.logging_steps == 0 and cur_step > 0:
+                # Save metrics
+                train_metric = jax_utils.unreplicate(train_metric)
+                train_time += time.time() - train_start
+                if has_tensorboard and jax.process_index() == 0:
+                    write_train_metric(summary_writer, train_metrics, train_time, cur_step)
 
-                    epochs.write(
-                        f"Step... ({cur_step} | Loss: {train_metric['loss'].mean()}, Learning Rate:"
-                        f" {train_metric['learning_rate'].mean()})"
+                steps_pbar.write(
+                    f"Step... ({cur_step} | Loss: {train_metric['loss'].mean()}, Learning Rate:"
+                    f" {train_metric['learning_rate'].mean()})"
+                )
+
+                train_metrics = []
+
+            if training_args.eval_steps and cur_step % training_args.eval_steps == 0 and cur_step > 0:
+                # ======================== Evaluating ==============================
+                eval_metrics = []
+                eval_steps = 100  # Limit evaluation steps for streaming mode
+
+                eval_iter = iter(tokenized_datasets["validation"])
+                for eval_step_idx in range(eval_steps):
+                    eval_samples = collect_batch_samples(eval_iter, eval_batch_size)
+                    if len(eval_samples) < eval_batch_size:
+                        break
+
+                    try:
+                        eval_model_inputs = data_collator(eval_samples)
+                    except Exception as e:
+                        logger.warning(f"Error in eval data collator: {e}, skipping batch")
+                        continue
+
+                    # Model forward
+                    metrics = pad_shard_unpad(p_eval_step, static_return=True)(
+                        state.params, eval_model_inputs, min_device_batch=per_device_eval_batch_size
                     )
+                    eval_metrics.append(metrics)
 
-                    train_metrics = []
+                if eval_metrics:
+                    # get eval metrics
+                    eval_metrics = get_metrics(eval_metrics)
+                    eval_metrics = jax.tree_util.tree_map(jnp.mean, eval_metrics)
 
-                if training_args.eval_steps and cur_step % training_args.eval_steps == 0 and cur_step > 0:
-                    # ======================== Evaluating ==============================
-                    eval_metrics = []
-                    eval_steps = 100  # Limit evaluation steps for streaming mode
-                    
-                    eval_iter = iter(tokenized_datasets["validation"])
-                    for eval_step_idx in range(eval_steps):
-                        eval_samples = collect_batch_samples(eval_iter, eval_batch_size)
-                        if len(eval_samples) < eval_batch_size:
-                            break
-                            
-                        try:
-                            model_inputs = data_collator(eval_samples)
-                        except Exception as e:
-                            logger.warning(f"Error in eval data collator: {e}, skipping batch")
-                            continue
+                    # Update progress bar
+                    steps_pbar.write(f"Step... ({cur_step} | Eval Loss: {eval_metrics['loss']}, Acc: {eval_metrics['accuracy']})")
 
-                        # Model forward
-                        metrics = pad_shard_unpad(p_eval_step, static_return=True)(
-                            state.params, model_inputs.data, min_device_batch=per_device_eval_batch_size
+                    # Save metrics
+                    if has_tensorboard and jax.process_index() == 0:
+                        write_eval_metric(summary_writer, eval_metrics, cur_step)
+
+            if cur_step % training_args.save_steps == 0 and cur_step > 0:
+                # save checkpoint and push to hub
+                if jax.process_index() == 0:
+                    params = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state.params))
+                    model.save_pretrained(training_args.output_dir, params=params)
+                    tokenizer.save_pretrained(training_args.output_dir)
+                    if training_args.push_to_hub:
+                        api.upload_folder(
+                            commit_message=f"Saving weights and logs of step {cur_step} with datasets {data_args.dataset_name}",
+                            folder_path=training_args.output_dir,
+                            repo_id=repo_id,
+                            repo_type="model",
+                            token=training_args.hub_token,
                         )
-                        eval_metrics.append(metrics)
 
-                    if eval_metrics:
-                        # get eval metrics
-                        eval_metrics = get_metrics(eval_metrics)
-                        eval_metrics = jax.tree_util.tree_map(jnp.mean, eval_metrics)
+        # Save checkpoint after final step (streaming)
+        if jax.process_index() == 0:
+            logger.info(f"Training complete. Total train steps: {num_train_steps}")
+            params = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state.params))
+            model.save_pretrained(training_args.output_dir, params=params)
+            tokenizer.save_pretrained(training_args.output_dir)
+            if training_args.push_to_hub or training_args.push_to_hub_final_step:
+                api.upload_folder(
+                    commit_message=f"Saving model of final step with datasets {data_args.dataset_name}",
+                    folder_path=training_args.output_dir,
+                    repo_id=repo_id,
+                    repo_type="model",
+                    token=training_args.hub_token,
+                )
 
-                        # Update progress bar
-                        epochs.write(f"Step... ({cur_step} | Loss: {eval_metrics['loss']}, Acc: {eval_metrics['accuracy']})")
+    else:
+        # ======================== Non-Streaming Training with Epochs ================================
+        epochs = tqdm(range(num_epochs), desc="Epoch ... ", position=0)
 
-                        # Save metrics
-                        if has_tensorboard and jax.process_index() == 0:
-                            write_eval_metric(summary_writer, eval_metrics, cur_step)
+        for epoch in epochs:
+            train_start = time.time()
+            train_metrics = []
 
-                if cur_step % training_args.save_steps == 0 and cur_step > 0:
-                    # save checkpoint after each epoch and push checkpoint to the hub
-                    if jax.process_index() == 0:
-                        params = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state.params))
-                        model.save_pretrained(training_args.output_dir, params=params)
-                        tokenizer.save_pretrained(training_args.output_dir)
-                        if training_args.push_to_hub:
-                            api.upload_folder(
-                                commit_message=f"Saving weights and logs of step {cur_step} with datasets {data_args.dataset_name}",
-                                folder_path=training_args.output_dir,
-                                repo_id=repo_id,
-                                repo_type="model",
-                                token=training_args.hub_token,
-                            )
-                            
-                if cur_step == (num_train_steps - 1):
-                    # save checkpoint after final step
-                    epochs.write(f"num of total train steps: {num_train_steps}")
-                    epochs.write(f"current step number: {cur_step}")
-                    if jax.process_index() == 0:
-                        params = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state.params))
-                        model.save_pretrained(training_args.output_dir, params=params)
-                        tokenizer.save_pretrained(training_args.output_dir)
-                        if training_args.push_to_hub or training_args.push_to_hub_final_step:
-                            api.upload_folder(
-                                commit_message=f"Saving model of final step {cur_step} with datasets {data_args.dataset_name}",
-                                folder_path=training_args.output_dir,
-                                repo_id=repo_id,
-                                repo_type="model",
-                                token=training_args.hub_token,
-                            )
-                    break
-                        
-        else:
-            # Original non-streaming logic
             num_train_samples = len(tokenized_datasets["train"])
             train_samples_idx = np.random.permutation(np.arange(num_train_samples))
             train_batch_idx = generate_batch_splits(train_samples_idx, train_batch_size)
@@ -1062,8 +1064,8 @@ def main():
                 model_inputs = data_collator(samples)
 
                 local_host_model_inputs = {
-                    key: np.split(model_inputs.data[key], num_of_hosts, axis=0)[current_host_idx]
-                    for key, value in model_inputs.data.items()
+                    key: np.split(model_inputs[key], num_of_hosts, axis=0)[current_host_idx]
+                    for key in model_inputs.keys()
                 }
 
                 # Model forward
@@ -1101,7 +1103,7 @@ def main():
 
                         # Model forward
                         metrics = pad_shard_unpad(p_eval_step, static_return=True)(
-                            state.params, model_inputs.data, min_device_batch=per_device_eval_batch_size
+                            state.params, model_inputs, min_device_batch=per_device_eval_batch_size
                         )
                         eval_metrics.append(metrics)
 
@@ -1154,13 +1156,13 @@ def main():
             # Limited evaluation for streaming datasets
             eval_metrics = []
             eval_steps = 100  # Limit evaluation steps
-            
+
             eval_iter = iter(tokenized_datasets["validation"])
             for eval_step_idx in range(eval_steps):
                 eval_samples = collect_batch_samples(eval_iter, eval_batch_size)
                 if len(eval_samples) < eval_batch_size:
                     break
-                    
+
                 try:
                     model_inputs = data_collator(eval_samples)
                 except Exception as e:
@@ -1169,7 +1171,7 @@ def main():
 
                 # Model forward
                 metrics = pad_shard_unpad(p_eval_step, static_return=True)(
-                    state.params, model_inputs.data, min_device_batch=per_device_eval_batch_size
+                    state.params, model_inputs, min_device_batch=per_device_eval_batch_size
                 )
                 eval_metrics.append(metrics)
         else:
@@ -1186,7 +1188,7 @@ def main():
 
                 # Model forward
                 metrics = pad_shard_unpad(p_eval_step, static_return=True)(
-                    state.params, model_inputs.data, min_device_batch=per_device_eval_batch_size
+                    state.params, model_inputs, min_device_batch=per_device_eval_batch_size
                 )
                 eval_metrics.append(metrics)
 
