@@ -44,6 +44,46 @@ This version uses Hugging Face Accelerate library for unified GPU/TPU/multi-GPU 
 - You want simpler, more maintainable code
 - You need easy switching between different hardware setups
 
+#### 3. `run_t5_mlm_pretrain_simple_accelerate_hf.py` - Simplified Accelerate Version ⭐⭐ HIGHLY RECOMMENDED
+Ultra-simplified version using HuggingFace's built-in `DataCollatorForT5MLM` class with Accelerate.
+
+**Pros:**
+- ✅ **Much simpler code** (~300 lines vs 1000 lines) - No custom data collator!
+- ✅ **Uses built-in HuggingFace classes** - Well-tested and maintained
+- ✅ **Works on both GPU and TPU** with the same code
+- ✅ **Easy distributed training** - Accelerate handles everything
+- ✅ **Mixed precision** - Built-in support for fp16/bf16
+- ✅ **Production-ready** - Cleaner, more maintainable
+
+**Cons:**
+- Slightly less customizable than version 2 (but covers 99% of use cases)
+
+**Use when:**
+- ✅ **Best choice for most users!** - Simplest production-ready code
+- You want to use well-tested HuggingFace components
+- You want code that's easy to understand and maintain
+- You need GPU/TPU flexibility without complexity
+
+#### 4. `run_t5_mlm_pretrain_simple_trainer_hf.py` - Ultra-Simplified Trainer Version 🚀 EASIEST
+The simplest possible implementation using HuggingFace's `Trainer` API.
+
+**Pros:**
+- ✅ **Ultra-simple code** (~150 lines total!)
+- ✅ **Trainer handles everything** - Training loop, eval, checkpointing, logging
+- ✅ **Automatic distributed training** - Multi-GPU/TPU handled automatically
+- ✅ **Built-in integrations** - W&B, TensorBoard, MLflow support
+- ✅ **Best for beginners** - Minimal code, maximum functionality
+
+**Cons:**
+- ⚠️ **Less control** - Trainer abstracts away the training loop
+- ⚠️ **TPU support** - Requires additional configuration for TPU
+
+**Use when:**
+- You want the absolute simplest code possible
+- You're fine with Trainer's abstractions
+- You need quick experiments or prototyping
+- You want automatic integration with experiment tracking tools
+
 ### Fine-tuning Script
 
 #### `run_seq_to_seq_model_to_finetune.py` - Accelerate Version ⭐ RECOMMENDED
@@ -175,6 +215,81 @@ python run_t5_mlm_to_pretrain.py \
     --num_train_epochs 3 \
     --max_seq_length 512
 ```
+
+#### Using Simplified Accelerate Version (Recommended for Most Users!)
+
+The simplified version works exactly the same as version 2 but uses built-in HuggingFace classes:
+
+```bash
+# Same usage as version 2!
+accelerate launch run_t5_mlm_pretrain_simple_accelerate_hf.py \
+    --model_name_or_path t5-small \
+    --dataset_name wikitext \
+    --dataset_config_name wikitext-2-raw-v1 \
+    --do_train \
+    --do_eval \
+    --output_dir ./output \
+    --per_device_train_batch_size 8 \
+    --learning_rate 5e-5 \
+    --num_train_epochs 3 \
+    --max_seq_length 512 \
+    --mlm_probability 0.15 \
+    --mean_noise_span_length 3.0 \
+    --logging_steps 100 \
+    --save_steps 1000 \
+    --eval_steps 1000
+```
+
+**Benefits:**
+- ✅ Much simpler code (~300 lines vs 1000 lines)
+- ✅ Uses well-tested HuggingFace `DataCollatorForT5MLM`
+- ✅ Same performance and functionality
+- ✅ Works on GPU and TPU
+
+#### Using Ultra-Simplified Trainer Version (Easiest!)
+
+The Trainer version is the simplest - just specify arguments:
+
+```bash
+# For single GPU/CPU - just run directly
+python run_t5_mlm_pretrain_simple_trainer_hf.py \
+    --model_name_or_path t5-small \
+    --dataset_name wikitext \
+    --dataset_config_name wikitext-2-raw-v1 \
+    --do_train \
+    --do_eval \
+    --output_dir ./output \
+    --per_device_train_batch_size 8 \
+    --learning_rate 5e-5 \
+    --num_train_epochs 3 \
+    --max_seq_length 512 \
+    --mlm_probability 0.15 \
+    --mean_noise_span_length 3.0 \
+    --logging_steps 100 \
+    --save_steps 1000 \
+    --evaluation_strategy steps \
+    --eval_steps 1000 \
+    --save_total_limit 3
+```
+
+**For multi-GPU:**
+```bash
+# Trainer automatically handles multi-GPU!
+python -m torch.distributed.launch --nproc_per_node=4 \
+    run_t5_mlm_pretrain_simple_trainer_hf.py \
+    --model_name_or_path t5-small \
+    --dataset_name wikitext \
+    --dataset_config_name wikitext-2-raw-v1 \
+    --do_train --do_eval \
+    --output_dir ./output \
+    --per_device_train_batch_size 8
+```
+
+**Benefits:**
+- ✅ Absolutely simplest code (~150 lines!)
+- ✅ Trainer handles training loop, eval, checkpointing automatically
+- ✅ Built-in integration with W&B, TensorBoard
+- ✅ Perfect for quick experiments
 
 ### Fine-tuning (Seq2Seq)
 
@@ -468,21 +583,49 @@ python -c "import torch_xla.core.xla_model as xm; print(xm.xla_device())"
 accelerate config
 ```
 
-## Comparison Summary
+## Comparison Summary - Pretraining Scripts
 
-| Feature | torch_xla Version | Accelerate Version |
-|---------|-------------------|-------------------|
-| GPU Support | ❌ No | ✅ Yes |
-| TPU Support | ✅ Yes | ✅ Yes |
-| Multi-GPU | ❌ Complex | ✅ Easy |
-| Code Simplicity | Medium | ✅ High |
-| Hardware Portability | Low | ✅ High |
-| Performance | ✅ Optimal for TPU | Good on all |
-| Mixed Precision | Manual | ✅ Built-in |
-| Recommended for | TPU-only workloads | ✅ All scenarios |
+| Feature | V1: torch_xla | V2: Accelerate (Custom) | V3: Accelerate (Simple) ⭐⭐ | V4: Trainer 🚀 |
+|---------|---------------|------------------------|---------------------------|----------------|
+| **Lines of Code** | ~1000 | ~1000 | ~300 | ~150 |
+| **GPU Support** | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes |
+| **TPU Support** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Requires config |
+| **Multi-GPU** | ❌ Complex | ✅ Easy | ✅ Easy | ✅ Automatic |
+| **Code Simplicity** | Medium | Medium | ✅✅ Very High | ✅✅✅ Extremely High |
+| **Hardware Portability** | Low | ✅ High | ✅ High | ✅ High |
+| **Uses Built-in HF Classes** | ❌ No | ❌ Custom | ✅✅ Yes | ✅✅ Yes |
+| **Training Loop Control** | ✅ Full | ✅ Full | ✅ Full | ⚠️ Limited |
+| **Mixed Precision** | Manual | ✅ Built-in | ✅ Built-in | ✅ Built-in |
+| **Best For** | TPU-only | Production (custom) | ✅ **Most users** | Quick experiments |
+| **Maintainability** | Medium | Medium | ✅✅ High | ✅✅ High |
+
+### Which Version Should You Use?
+
+#### 🏆 For Most Users: **Version 3** (`run_t5_mlm_pretrain_simple_accelerate_hf.py`)
+- ✅ Best balance of simplicity and control
+- ✅ Uses well-tested HuggingFace `DataCollatorForT5MLM`
+- ✅ Works on GPU and TPU seamlessly
+- ✅ Production-ready, clean code
+- ✅ Easy to understand and maintain
+
+#### 🚀 For Beginners/Quick Experiments: **Version 4** (`run_t5_mlm_pretrain_simple_trainer_hf.py`)
+- ✅ Absolutely simplest code
+- ✅ Trainer handles everything automatically
+- ✅ Perfect for quick prototyping
+- ⚠️ Less control over training loop
+
+#### 🔧 For Advanced Users Needing Customization: **Version 2** (`run_t5_mlm_to_pretrain_accelerate.py`)
+- ✅ Full control over data collation logic
+- ✅ Easier to customize masking strategy
+- ✅ Good for research and experimentation
+
+#### 🎯 For TPU-Only Production: **Version 1** (`run_t5_mlm_to_pretrain.py`)
+- ✅ Maximum TPU optimization
+- ⚠️ No GPU support
+- ⚠️ More complex code
 
 ## Conclusion
 
-**Use `run_t5_mlm_to_pretrain_accelerate.py`** for most use cases. It provides the best flexibility, works on both GPU and TPU, and requires minimal code changes when switching hardware.
+**RECOMMENDED:** Start with **Version 3** (`run_t5_mlm_pretrain_simple_accelerate_hf.py`) for production use. It's the best balance of simplicity, flexibility, and maintainability.
 
-**Use `run_t5_mlm_to_pretrain.py`** only if you need maximum TPU optimization and won't be using GPUs.
+**For quick experiments:** Use **Version 4** (`run_t5_mlm_pretrain_simple_trainer_hf.py`) - the Trainer API makes it incredibly easy to get started.
