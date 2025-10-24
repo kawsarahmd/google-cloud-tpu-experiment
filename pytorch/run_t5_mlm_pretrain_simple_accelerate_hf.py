@@ -1,11 +1,17 @@
 #!/usr/bin/env python
-# Simplified T5 MLM pretraining using HuggingFace built-in classes with Accelerate for GPU/TPU support.
+# Simplified T5 MLM pretraining using custom DataCollatorForT5MLM with Accelerate for GPU/TPU support.
 
 """
 Simplified pretraining script for T5-like span-masked language modeling.
-Uses HuggingFace's built-in DataCollatorForT5MLM instead of custom implementation.
+Includes custom DataCollatorForT5MLM implementation for T5's span corruption objective.
 
-This version is much simpler (~300 lines vs 1000 lines) while maintaining all functionality.
+This version is simpler and includes robust error handling for TPU training.
+
+Key features:
+- Custom DataCollatorForT5MLM with span corruption
+- Works on both GPU and TPU via Accelerate
+- Robust error handling for edge cases
+- Supports all T5-style models (T5, mT5, etc.)
 """
 
 import json
@@ -33,14 +39,215 @@ from transformers import (
     AutoTokenizer,
     T5ForConditionalGeneration,
     T5Config,
-    DataCollatorForT5MLM,  # ✅ Built-in HuggingFace class!
     HfArgumentParser,
     get_linear_schedule_with_warmup,
 )
 from transformers.utils import send_example_telemetry
+import numpy as np
 
 
 logger = get_logger(__name__)
+
+
+# Custom DataCollatorForT5MLM implementation (since it's not in transformers by default)
+class DataCollatorForT5MLM:
+    """
+    Data collator for T5 span-masked language modeling.
+    Implements the span corruption objective from the T5 paper.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        noise_density: float = 0.15,
+        mean_noise_span_length: float = 3.0,
+        input_length: int = 512,
+        target_length: int = 114,
+        pad_token_id: int = 0,
+        decoder_start_token_id: int = 0,
+    ):
+        self.tokenizer = tokenizer
+        self.noise_density = noise_density
+        self.mean_noise_span_length = mean_noise_span_length
+        self.input_length = input_length
+        self.target_length = target_length
+        self.pad_token_id = pad_token_id
+        self.decoder_start_token_id = decoder_start_token_id
+
+        # Get sentinel token IDs
+        self.sentinel_ids = []
+        for i in range(100):
+            sentinel_id = tokenizer.convert_tokens_to_ids(f"<extra_id_{i}>")
+            if sentinel_id != tokenizer.unk_token_id:
+                self.sentinel_ids.append(sentinel_id)
+
+    def __call__(self, examples):
+        # Get input_ids from examples
+        input_ids = [example["input_ids"] for example in examples]
+
+        batch_size = len(input_ids)
+
+        # Create masks for each example
+        input_ids_masked = []
+        labels_list = []
+
+        for i in range(batch_size):
+            ids = input_ids[i]
+
+            # Skip empty sequences
+            if len(ids) == 0:
+                input_ids_masked.append([self.pad_token_id])
+                labels_list.append([-100])
+                continue
+
+            # Create noise mask
+            noise_mask = self._random_spans_noise_mask(len(ids))
+
+            # Apply mask to create inputs and labels
+            masked_inputs, labels = self._create_sentinel_masked_inputs_and_labels(
+                ids, noise_mask
+            )
+
+            # Ensure we have valid inputs and labels
+            if len(masked_inputs) == 0:
+                masked_inputs = [self.pad_token_id]
+            if len(labels) == 0:
+                labels = [-100]
+
+            input_ids_masked.append(masked_inputs)
+            labels_list.append(labels)
+
+        # Pad inputs and labels
+        max_input_length = max(len(x) for x in input_ids_masked)
+        max_label_length = max(len(x) for x in labels_list)
+
+        # Ensure they don't exceed specified lengths
+        max_input_length = min(max_input_length, self.input_length)
+        max_label_length = min(max_label_length, self.target_length)
+
+        # Create padded tensors
+        input_ids_padded = []
+        attention_mask_padded = []
+        labels_padded = []
+
+        for masked_input, label in zip(input_ids_masked, labels_list):
+            # Truncate if needed
+            masked_input = masked_input[:max_input_length]
+            label = label[:max_label_length]
+
+            # Pad input
+            input_padding_length = max_input_length - len(masked_input)
+            padded_input = masked_input + [self.pad_token_id] * input_padding_length
+            attention = [1] * len(masked_input) + [0] * input_padding_length
+
+            # Pad label
+            label_padding_length = max_label_length - len(label)
+            padded_label = label + [-100] * label_padding_length
+
+            input_ids_padded.append(padded_input)
+            attention_mask_padded.append(attention)
+            labels_padded.append(padded_label)
+
+        batch = {
+            "input_ids": torch.tensor(input_ids_padded, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask_padded, dtype=torch.long),
+            "labels": torch.tensor(labels_padded, dtype=torch.long),
+        }
+
+        return batch
+
+    def _random_spans_noise_mask(self, length):
+        """Create a random span mask for the given length."""
+
+        if length < 2:
+            return np.zeros(length, dtype=bool)
+
+        num_noise_tokens = int(np.round(length * self.noise_density))
+        num_noise_tokens = min(max(num_noise_tokens, 1), length - 1)
+        num_noise_spans = int(np.round(num_noise_tokens / self.mean_noise_span_length))
+        num_noise_spans = max(num_noise_spans, 1)
+
+        num_nonnoise_tokens = length - num_noise_tokens
+
+        # Create mask
+        mask = np.zeros(length, dtype=bool)
+
+        # Handle edge cases
+        if num_noise_tokens == 0 or num_noise_spans == 0:
+            return mask
+
+        if num_nonnoise_tokens <= 0:
+            mask[:num_noise_tokens] = True
+            return mask
+
+        try:
+            # Randomly select noise span positions
+            noise_span_lengths = np.random.multinomial(
+                num_noise_tokens,
+                np.ones(num_noise_spans) / num_noise_spans
+            )
+
+            # Randomly select positions for noise spans
+            nonnoise_span_lengths = np.random.multinomial(
+                num_nonnoise_tokens,
+                np.ones(num_noise_spans + 1) / (num_noise_spans + 1)
+            )
+
+            pos = 0
+            for nonnoise_len, noise_len in zip(nonnoise_span_lengths[:-1], noise_span_lengths):
+                pos += nonnoise_len
+                if pos + noise_len <= length:
+                    mask[pos:pos + noise_len] = True
+                pos += noise_len
+        except Exception as e:
+            # Fallback to simple random masking if multinomial fails
+            logger.warning(f"Failed to create span mask, using simple random masking: {e}")
+            indices = np.random.choice(length, size=num_noise_tokens, replace=False)
+            mask[indices] = True
+
+        return mask
+
+    def _create_sentinel_masked_inputs_and_labels(self, input_ids, noise_mask):
+        """Create sentinel-masked inputs and labels."""
+
+        # Find noise spans
+        noise_spans = []
+        start = None
+        for i, is_noise in enumerate(noise_mask):
+            if is_noise and start is None:
+                start = i
+            elif not is_noise and start is not None:
+                noise_spans.append((start, i))
+                start = None
+        if start is not None:
+            noise_spans.append((start, len(noise_mask)))
+
+        # Create masked inputs with sentinels
+        masked_inputs = []
+        labels = []
+
+        prev_end = 0
+        for sentinel_idx, (start, end) in enumerate(noise_spans):
+            # Add non-masked tokens before this span
+            masked_inputs.extend(input_ids[prev_end:start])
+
+            # Add sentinel to inputs
+            if sentinel_idx < len(self.sentinel_ids):
+                masked_inputs.append(self.sentinel_ids[sentinel_idx])
+                # Add sentinel and masked tokens to labels
+                labels.append(self.sentinel_ids[sentinel_idx])
+                labels.extend(input_ids[start:end])
+
+            prev_end = end
+
+        # Add remaining non-masked tokens
+        masked_inputs.extend(input_ids[prev_end:])
+
+        # Add final EOS token to labels
+        if len(labels) > 0 and self.tokenizer.eos_token_id is not None:
+            labels.append(self.tokenizer.eos_token_id)
+
+        return masked_inputs, labels
 
 
 @dataclass
@@ -325,6 +532,7 @@ def main():
         model = T5ForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             config=config,
+            cache_dir=model_args.cache_dir,
             token=model_args.token,
         )
         logger.info("Loaded model from pretrained checkpoint")
@@ -384,8 +592,8 @@ def main():
             desc="Grouping texts",
         )
 
-    # ✅ USE BUILT-IN HUGGINGFACE DATA COLLATOR
-    # This replaces our 200+ line custom implementation!
+    # ✅ USE CUSTOM DATA COLLATOR FOR T5 MLM
+    # This implements T5's span corruption objective
     data_collator = DataCollatorForT5MLM(
         tokenizer=tokenizer,
         noise_density=data_args.mlm_probability,
