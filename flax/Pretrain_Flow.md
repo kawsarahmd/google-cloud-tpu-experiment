@@ -14,7 +14,7 @@
 13. Run Training Loop (Logging / Eval / Save)
 14. Final Evaluation & Save Metrics
 
-
+```
 #### Compact Pseudocode
 
 #### hyperparams
@@ -63,4 +63,4 @@ ASSERT(len(labels) == target_length)
 
 #### step 8: decoder_input_ids (teacher forcing)
 decoder_input_ids = [<dec_start>] + labels[:-1]
-
+```
