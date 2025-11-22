@@ -141,6 +141,206 @@ def compute_input_and_target_lengths(inputs_length, noise_density, mean_noise_sp
         targets_length -= 1
     return tokens_length, targets_length
 
+import torch
+from torch.nn.utils.rnn import pad_sequence
+from transformers import PreTrainedTokenizerBase
+from typing import List, Dict
+
+
+class DataCollatorForT5MLM_PT:
+    """
+    Fully PyTorch equivalent of your NumPy DataCollatorForT5MLM.
+    """
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        noise_density: float,
+        mean_noise_span_length: float,
+        input_length: int,
+        target_length: int,
+        pad_token_id: int,
+        decoder_start_token_id: int,
+    ):
+        self.tokenizer = tokenizer
+        self.vocab_size = len(tokenizer)
+        self.noise_density = noise_density
+        self.mean_noise_span_length = mean_noise_span_length
+        self.input_length = input_length
+        self.target_length = target_length
+        self.pad_token_id = pad_token_id
+        self.decoder_start_token_id = decoder_start_token_id
+
+    # ------------------------------------------------------------------------
+    # MAIN COLLATOR FUNCTION
+    # ------------------------------------------------------------------------
+    def __call__(self, examples: List[Dict[str, torch.Tensor]]):
+
+        # Convert batch list → dict of stacked tensors
+        batch = {
+            k: torch.stack([ex[k] for ex in examples], dim=0)
+            for k in examples[0].keys()
+        }
+
+        input_ids = batch["input_ids"]
+        batch_size, expanded_length = input_ids.shape
+
+        # 1) random noise mask (NumPy original behavior)
+        mask_indices = torch.stack(
+            [
+                self.random_spans_noise_mask_pt(expanded_length)
+                for _ in range(batch_size)
+            ],
+            dim=0,
+        ).long()
+
+        labels_mask = (mask_indices == 0).long()
+
+        # 2) sentinel id creation
+        input_ids_sentinel = self.create_sentinel_ids_pt(mask_indices)
+        labels_sentinel = self.create_sentinel_ids_pt(labels_mask)
+
+        # 3) build final input_ids + labels
+        batch["input_ids"] = self.filter_input_ids_pt(
+            input_ids=input_ids,
+            sentinel_ids=input_ids_sentinel,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
+        batch["labels"] = self.filter_input_ids_pt(
+            input_ids=input_ids,
+            sentinel_ids=labels_sentinel,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
+        # enforce correct lengths
+        if batch["input_ids"].shape[-1] != self.input_length:
+            raise ValueError(
+                f"input_ids length = {batch['input_ids'].shape[-1]}, expected {self.input_length}"
+            )
+        if batch["labels"].shape[-1] != self.target_length:
+            raise ValueError(
+                f"labels length = {batch['labels'].shape[-1]}, expected {self.target_length}"
+            )
+
+        # 4) decoder_input_ids
+        batch["decoder_input_ids"] = self.shift_tokens_right_pt(
+            batch["labels"],
+            pad_token_id=self.pad_token_id,
+            decoder_start_token_id=self.decoder_start_token_id,
+        )
+
+        return batch
+
+    # ------------------------------------------------------------------------
+    # SHIFT TOKENS RIGHT
+    # ------------------------------------------------------------------------
+    def shift_tokens_right_pt(self, input_ids, pad_token_id, decoder_start_token_id):
+        shifted = torch.zeros_like(input_ids)
+        shifted[:, 1:] = input_ids[:, :-1]
+        shifted[:, 0] = decoder_start_token_id
+
+        shifted = torch.where(
+            shifted == -100,
+            torch.tensor(pad_token_id, device=shifted.device),
+            shifted,
+        )
+        return shifted
+
+    # ------------------------------------------------------------------------
+    # CREATE SENTINEL IDS (pt version)
+    # ------------------------------------------------------------------------
+    def create_sentinel_ids_pt(self, mask_indices):
+        """
+        mask_indices: (batch, seq) 0/1 LongTensor
+        """
+        mask_indices = mask_indices.long()
+
+        rolled = torch.roll(mask_indices, shifts=1, dims=1)
+        rolled[:, 0] = 0
+
+        start = mask_indices - rolled * mask_indices
+        start[:, 0] = mask_indices[:, 0]
+
+        cumsum = torch.cumsum(start, dim=1)
+        sentinel = torch.where(start != 0, cumsum, start)
+
+        vocab_t = torch.tensor(self.vocab_size, device=sentinel.device)
+        sentinel = torch.where(
+            sentinel != 0,
+            vocab_t - sentinel,
+            torch.zeros_like(sentinel),
+        )
+
+        sentinel = sentinel - (mask_indices - start)
+        return sentinel.long()
+
+    # ------------------------------------------------------------------------
+    # FILTER: remove negative positions, flatten reshape, add EOS
+    # ------------------------------------------------------------------------
+    def filter_input_ids_pt(self, input_ids, sentinel_ids, eos_token_id):
+        """
+        Matches the NumPy logic exactly:
+            - where(sentinel!=0 → sentinel else input_ids)
+            - flatten all rows
+            - keep only >=0
+            - reshape(batch,-1)
+            - append EOS per row
+        """
+        batch_size = input_ids.size(0)
+        replaced = torch.where(sentinel_ids != 0, sentinel_ids, input_ids)
+
+        flat = replaced[replaced >= 0]
+        reshaped = flat.view(batch_size, -1)
+
+        eos_col = torch.full(
+            (batch_size, 1),
+            eos_token_id,
+            dtype=reshaped.dtype,
+            device=reshaped.device,
+        )
+        return torch.cat([reshaped, eos_col], dim=1)
+
+    # ------------------------------------------------------------------------
+    # RANDOM SPANS MASK
+    # ------------------------------------------------------------------------
+    def random_spans_noise_mask_pt(self, length):
+        L = length
+
+        num_noise = int(round(L * self.noise_density))
+        num_noise = min(max(num_noise, 1), L - 1)
+        num_nonnoise = L - num_noise
+
+        num_noise_spans = int(
+            round(min(num_noise, num_nonnoise) / self.mean_noise_span_length)
+        )
+        num_noise_spans = max(num_noise_spans, 1)
+
+        # ---- internal segmentation ----
+        def random_segmentation(num_items, num_segments):
+            base = torch.arange(num_items - 1) < (num_segments - 1)
+            perm = torch.randperm(num_items - 1)
+            base = base[perm]
+            first = torch.cat([torch.tensor([0], dtype=torch.long), base.long()])
+            seg_ids = torch.cumsum(first, dim=0)
+            _, counts = torch.unique_consecutive(seg_ids, return_counts=True)
+            return counts
+
+        noise_span_lengths = random_segmentation(num_noise, num_noise_spans)
+        nonnoise_span_lengths = random_segmentation(num_nonnoise, num_noise_spans)
+
+        interleaved = torch.stack(
+            [nonnoise_span_lengths, noise_span_lengths],
+            dim=1,
+        ).reshape(-1)
+
+        span_starts = torch.cumsum(interleaved, dim=0)[:-1]
+
+        indicator = torch.zeros(L, dtype=torch.long)
+        indicator[span_starts] = 1
+
+        span_num = torch.cumsum(indicator, dim=0)
+        return (span_num % 2 == 1).long()
 
 class DataCollatorForT5MLM:
     """Data collator for T5 span-masked language modeling."""
@@ -442,7 +642,7 @@ def _mp_fn(index, args):
     )
 
     # Data collator
-    data_collator = DataCollatorForT5MLM(
+    data_collator = DataCollatorForT5MLM_PT(
         tokenizer=tokenizer,
         noise_density=data_args.mlm_probability,
         mean_noise_span_length=data_args.mean_noise_span_length,
